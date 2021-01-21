@@ -1,0 +1,66 @@
+NAME: 'resnet50.base.sgd'
+
+DATASET:
+  TYPE: 'multi_label'
+  NAME: 'coco'
+  TRAIN_SPLIT: 'train'
+  VAL_SPLIT: 'val'
+  HEIGHT: 448
+  WIDTH: 448
+
+BACKBONE:
+  TYPE: 'resnet50'
+
+LOSS:
+  TYPE: 'bce'
+  LOSS_WEIGHT: [1,]
+  SAMPLE_WEIGHT: ''
+
+CLASSIFIER:
+  TYPE: 'base'
+  POOLING: 'avg'
+  SCALE: 1
+  BN: False
+
+TRAIN:
+  BATCH_SIZE: 16  # per gpu
+  MAX_EPOCH: 25
+  CLIP_GRAD: False
+  BN_WD: True
+  EMA:
+    ENABLE: True
+  DATAAUG:
+    TYPE: 'autoaug'
+    AUTOAUG_PROB: 1.0
+
+#  OPTIMIZER:
+#    TYPE: 'SGD'
+#    MOMENTUM: 0.9
+#    WEIGHT_DECAY: 1e-4
+#  LR_SCHEDULER:
+#    TYPE: 'warmup_cosine'
+#    LR_FT: 0.001
+#    LR_NEW: 0.001
+#    WMUP_COEF: 0.3
+
+
+  #  OPTIMIZER:
+#    TYPE: 'adamw'
+#    WEIGHT_DECAY: 1e-4
+#  LR_SCHEDULER:
+#    TYPE: 'warmup_cosine'
+#    LR_FT: 2e-4
+#    LR_NEW: 2e-4
+
+  OPTIMIZER:
+    TYPE: 'adam'
+    WEIGHT_DECAY: 1e-4
+  LR_SCHEDULER:
+    TYPE: 'warmup_cosine'
+    LR_FT: 2e-4
+    LR_NEW: 2e-4
+    WMUP_COEF: 0.3
+
+METRIC:
+  TYPE: 'multi_label'
+
