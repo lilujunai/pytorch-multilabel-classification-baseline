@@ -1,8 +1,12 @@
+import random
 import torch
 import numpy as np
 import torchvision.transforms as T
+from PIL import ImageDraw
 
 from dataset.autoaug import AutoAugment
+
+from randaugment import RandAugment
 
 
 class Cutout(object):
@@ -47,6 +51,28 @@ class Cutout(object):
         return img
 
 
+class CutoutPIL(object):
+    def __init__(self, cutout_factor=0.5):
+        self.cutout_factor = cutout_factor
+
+    def __call__(self, x):
+        img_draw = ImageDraw.Draw(x)
+        h, w = x.size[0], x.size[1]  # HWC
+        h_cutout = int(self.cutout_factor * h + 0.5)
+        w_cutout = int(self.cutout_factor * w + 0.5)
+        y_c = np.random.randint(h)
+        x_c = np.random.randint(w)
+
+        y1 = np.clip(y_c - h_cutout // 2, 0, h)
+        y2 = np.clip(y_c + h_cutout // 2, 0, h)
+        x1 = np.clip(x_c - w_cutout // 2, 0, w)
+        x2 = np.clip(x_c + w_cutout // 2, 0, w)
+        fill_color = (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+        img_draw.rectangle([x1, y1, x2, y2], fill=fill_color)
+
+        return x
+
+
 def get_transform(cfg):
     height = cfg.DATASET.HEIGHT
     width = cfg.DATASET.WIDTH
@@ -60,14 +86,22 @@ def get_transform(cfg):
             # normalize,
         ])
 
-        if cfg.TRAIN.DATAAUG.TYPE == 'autoaug':
+        if cfg.TRAIN.DATAAUG.TYPE == 'randaug':
+            # train_transform = T.Compose([
+            #     T.RandomApply([AutoAugment()], p=cfg.TRAIN.DATAAUG.AUTOAUG_PROB),
+            #     T.Resize((height, width), interpolation=3),
+            #     CutoutPIL(cutout_factor=0.5),
+            #     T.RandomHorizontalFlip(),
+            #     T.ToTensor(),
+            # ])
+
             train_transform = T.Compose([
-                T.RandomApply([AutoAugment()], p=cfg.TRAIN.DATAAUG.AUTOAUG_PROB),
                 T.Resize((height, width), interpolation=3),
-                T.RandomHorizontalFlip(),
+                CutoutPIL(cutout_factor=0.5),
+                RandAugment(),
                 T.ToTensor(),
             ])
-        else:
+        elif cfg.TRAIN.DATAAUG.TYPE == 'norm':
             train_transform = T.Compose([
                 T.Resize((height, width)),
                 T.RandomHorizontalFlip(),
@@ -75,6 +109,10 @@ def get_transform(cfg):
                 # T.RandomErasing(scale=(0.1, 0.5))
                 # normalize,
             ])
+        else:
+            assert False, f'current {cfg.TRAIN.DATAAUG.TYPE} augmentation has not been achieved'
+
+
     else:
         assert False, 'xxxxxxxx'
 

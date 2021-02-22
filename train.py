@@ -14,14 +14,16 @@ from dataset.multi_label.coco import COCO14
 from dataset.augmentation import get_transform
 from metrics.ml_metrics import get_map_metrics, get_multilabel_metrics
 from models.model_ema import ModelEmaV2
+from models.tresnet.tresnet import TResnetL
 from optim.adamw import AdamW
 from scheduler.cosine_lr import CosineLRScheduler
 from tools.distributed import distribute_bn
+import torch.distributed as dist
 
 # os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
 import torch
-from torch.optim.lr_scheduler import ReduceLROnPlateau, MultiStepLR, CosineAnnealingWarmRestarts
+from torch.optim.lr_scheduler import ReduceLROnPlateau, MultiStepLR, CosineAnnealingWarmRestarts, OneCycleLR
 from torch.utils.data import DataLoader
 
 from batch_engine import valid_trainer, batch_trainer
@@ -63,7 +65,8 @@ def main(cfg, args):
         writer = SummaryWriter(log_dir=writer_dir)
 
     if cfg.REDIRECTOR:
-        print('redirector stdout')
+        if args.local_rank == 0:
+            print('redirector stdout')
         ReDirectSTD(stdout_file, 'stdout', False)
 
     if 'WORLD_SIZE' in os.environ:
@@ -80,8 +83,12 @@ def main(cfg, args):
         torch.distributed.init_process_group(backend='nccl', init_method='env://')
         args.world_size = torch.distributed.get_world_size()
         args.rank = torch.distributed.get_rank()
-        print(f'use GPU{args.device} for training')
-        print(args.world_size, args.rank)
+        # print(f'use GPU{args.device} for training')
+        # print(args.world_size, args.rank)
+        print('Training in distributed mode with multiple processes, 1 GPU per process. Process %d, total %d.' % (
+            args.rank, args.world_size))
+    else:
+        print('Training with a single process on 1 GPUs.')
 
     # pprint.pprint(OrderedDict(cfg.__dict__))
     if args.local_rank == 0:
@@ -97,16 +104,20 @@ def main(cfg, args):
 
         valid_set = COCO14(cfg=cfg, split=cfg.DATASET.VAL_SPLIT, transform=valid_tsfm,
                            target_transform=cfg.DATASET.TARGETTRANSFORM)
+    else:
+        assert False, ''
 
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_set)
+        valid_sampler = torch.utils.data.distributed.DistributedSampler(valid_set, shuffle=False)
 
     else:
         train_sampler = None
+        valid_sampler = None
 
     train_loader = DataLoader(
         dataset=train_set,
-        batch_size=cfg.TRAIN.BATCH_SIZE,
+        batch_size=cfg.TRAIN.BATCH_SIZE // dist.get_world_size() if args.distributed else 16,
         sampler=train_sampler,
         shuffle=train_sampler is None,
         num_workers=4,
@@ -115,10 +126,11 @@ def main(cfg, args):
 
     valid_loader = DataLoader(
         dataset=valid_set,
-        batch_size=cfg.TRAIN.BATCH_SIZE,
+        batch_size=cfg.TRAIN.BATCH_SIZE // dist.get_world_size() if args.distributed else 16,
+        sampler=valid_sampler,
         shuffle=False,
         num_workers=4,
-        pin_memory=True,
+        pin_memory=False,
     )
 
     if args.local_rank == 0:
@@ -132,9 +144,17 @@ def main(cfg, args):
     label_ratio = labels.mean(0) if cfg.LOSS.SAMPLE_WEIGHT else None
 
     backbone = model_dict[cfg.BACKBONE.TYPE][0]
+    # backbone = TResnetL()
+
+
+    # state = torch.load('./pretrained/tresnet_l.pth', map_location='cpu')
+    # filtered_dict = {k: v for k, v in state['model'].items() if
+    #                  (k in backbone.state_dict() and 'head.fc' not in k)}
+    # backbone.load_state_dict(filtered_dict, strict=False)
 
     classifier = classifier_dict[cfg.CLASSIFIER.TYPE](nattr=train_set.attr_num,
                                                       c_in=model_dict[cfg.BACKBONE.TYPE][1],
+                                                      # c_in=2432,
                                                       bn=cfg.CLASSIFIER.BN,
                                                       pool=cfg.CLASSIFIER.POOLING,
                                                       scale=cfg.CLASSIFIER.SCALE,
@@ -154,8 +174,8 @@ def main(cfg, args):
 
     model = model.cuda()
     if args.distributed:
-        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank])
+        # model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank], broadcast_buffers=False)
     else:
         model = torch.nn.DataParallel(model)
 
@@ -209,7 +229,6 @@ def main(cfg, args):
     elif cfg.TRAIN.LR_SCHEDULER.TYPE == 'multistep':
         lr_scheduler = MultiStepLR(optimizer, milestones=cfg.TRAIN.LR_SCHEDULER.LR_STEP, gamma=0.1)
     elif cfg.TRAIN.LR_SCHEDULER.TYPE == 'warmup_cosine':
-
         lr_scheduler = CosineLRScheduler(
             optimizer,
             t_initial=cfg.TRAIN.MAX_EPOCH,
@@ -217,6 +236,15 @@ def main(cfg, args):
             warmup_lr_init=1e-4,
             warmup_t=cfg.TRAIN.MAX_EPOCH * cfg.TRAIN.LR_SCHEDULER.WMUP_COEF,
         )
+    elif cfg.TRAIN.LR_SCHEDULER.TYPE == 'onecycle':
+        lr_scheduler = OneCycleLR(optimizer,
+                                  max_lr=cfg.TRAIN.LR_SCHEDULER.LR_NEW,
+                                  steps_per_epoch=len(train_loader),
+                                  epochs=40,
+                                  pct_start=0.2)
+
+        if args.local_rank == 0:
+            print(f'steps_per_epoch {len(train_loader)}')
 
     else:
         assert False, f'{cfg.LR_SCHEDULER.TYPE} has not been achieved yet'
@@ -239,6 +267,7 @@ def main(cfg, args):
 def trainer(cfg, args, epoch, model, model_ema, train_loader, valid_loader, criterion, optimizer, lr_scheduler,
             path, loss_w, viz, tb_writer):
     maximum = float(-np.inf)
+    maximum_ema = float(-np.inf)
     best_epoch = 0
 
     result_list = defaultdict()
@@ -259,7 +288,8 @@ def trainer(cfg, args, epoch, model, model_ema, train_loader, valid_loader, crit
             train_loader=train_loader,
             criterion=criterion,
             optimizer=optimizer,
-            loss_w=loss_w
+            loss_w=loss_w,
+            scheduler=lr_scheduler,
         )
 
         if args.distributed:
@@ -267,46 +297,56 @@ def trainer(cfg, args, epoch, model, model_ema, train_loader, valid_loader, crit
                 print("Distributing BatchNorm running means and vars")
             distribute_bn(model, args.world_size, args.dist_bn == 'reduce')
 
-        valid_loss, valid_gt, valid_probs, valid_imgs = valid_trainer(
-            args=args,
-            model=model,
-            valid_loader=valid_loader,
-            criterion=criterion,
-            loss_w=loss_w
-        )
+        # valid_loss, valid_gt, valid_probs, valid_imgs = valid_trainer(
+        #     args=args,
+        #     model=model,
+        #     valid_loader=valid_loader,
+        #     criterion=criterion,
+        #     loss_w=loss_w
+        # )
 
-        if model_ema is not None and not cfg.TRAIN.EMA.FORCE_CPU:
+        if model_ema is not None:  # and not cfg.TRAIN.EMA.FORCE_CPU:
 
             if args.local_rank == 0:
                 print('using model_ema to validate')
 
             if args.distributed:
                 distribute_bn(model_ema, args.world_size, args.dist_bn == 'reduce')
-            valid_loss, valid_gt, valid_probs, valid_imgs = valid_trainer(
+
+            valid_loss, valid_gt, valid_probs, valid_probs_ema, valid_imgs = valid_trainer(
                 args=args,
-                model=model_ema.module,
+                model=model,
+                ema_model=model_ema.module,
                 valid_loader=valid_loader,
                 criterion=criterion,
                 loss_w=loss_w
             )
 
-        if cfg.TRAIN.LR_SCHEDULER.TYPE == 'plateau':
-            lr_scheduler.step(metrics=valid_loss)
-        elif cfg.TRAIN.LR_SCHEDULER.TYPE == 'warmup_cosine':
-            lr_scheduler.step(epoch=e + 1)
-        else:
-            lr_scheduler.step()
+        # if cfg.TRAIN.LR_SCHEDULER.TYPE == 'plateau':
+        #     lr_scheduler.step(metrics=valid_loss)
+        # elif cfg.TRAIN.LR_SCHEDULER.TYPE == 'warmup_cosine':
+        #     lr_scheduler.step(epoch=e + 1)
+        # else:
+        #     lr_scheduler.step()
 
         if cfg.METRIC.TYPE == 'multi_label':
 
             train_metric = get_multilabel_metrics(train_gt, train_probs)
             valid_metric = get_multilabel_metrics(valid_gt, valid_probs)
 
+            if model_ema is not None:  # and not cfg.TRAIN.EMA.FORCE_CPU:
+                valid_metric_ema = get_multilabel_metrics(valid_gt, valid_probs_ema)
+
             if args.local_rank == 0:
                 print(
                     'Performance : mAP: {:.4f}, OP: {:.4f}, OR: {:.4f}, OF1: {:.4f} CP: {:.4f}, CR: {:.4f}, '
                     'CF1: {:.4f}'.format(valid_metric.map, valid_metric.OP, valid_metric.OR, valid_metric.OF1,
                                          valid_metric.CP, valid_metric.CR, valid_metric.CF1))
+                print(
+                    'EMA Performance : mAP: {:.4f}, OP: {:.4f}, OR: {:.4f}, OF1: {:.4f} CP: {:.4f}, CR: {:.4f}, '
+                    'CF1: {:.4f}'.format(valid_metric_ema.map, valid_metric_ema.OP, valid_metric_ema.OR,
+                                         valid_metric_ema.OF1,
+                                         valid_metric_ema.CP, valid_metric_ema.CR, valid_metric_ema.CF1))
                 print(f'{time_str()}')
                 print('-' * 60)
 
@@ -331,11 +371,26 @@ def trainer(cfg, args, epoch, model, model_ema, train_loader, valid_loader, crit
                                                     'CR': valid_metric.CR,
                                                     'CF1': valid_metric.CF1}, e)
 
+                tb_writer.add_scalars('test/ema_perf', {'mAP': valid_metric_ema.map,
+                                                        'OP': valid_metric_ema.OP,
+                                                        'OR': valid_metric_ema.OR,
+                                                        'OF1': valid_metric_ema.OF1,
+                                                        'CP': valid_metric_ema.CP,
+                                                        'CR': valid_metric_ema.CR,
+                                                        'CF1': valid_metric_ema.CF1}, e)
+
             cur_metric = valid_metric.map
             if cur_metric > maximum:
                 maximum = cur_metric
                 best_epoch = e
                 save_ckpt(model, path, e, maximum)
+
+            cur_metric = valid_metric_ema.map
+            if cur_metric > maximum_ema:
+                maximum_ema = cur_metric
+                best_epoch = e
+                save_ckpt(model, path, e, maximum_ema)
+
 
             result_list[e] = {
                 'train_result': train_metric, 'valid_result': valid_metric,
@@ -363,6 +418,8 @@ def argument_parser():
     parser.add_argument("--debug", type=str2bool, default="true")
     parser.add_argument('--local_rank', help='node rank for distributed training', default=0,
                         type=int)
+    parser.add_argument('--dist_bn', type=str, default='',
+                        help='Distribute BatchNorm stats between nodes after each epoch ("broadcast", "reduce", or "")')
 
     args = parser.parse_args()
 

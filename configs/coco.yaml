@@ -1,4 +1,4 @@
-NAME: 'resnet50.base.sgd'
+NAME: 'tresnetl.base.sgd'
 
 DATASET:
   TYPE: 'multi_label'
@@ -9,7 +9,8 @@ DATASET:
   WIDTH: 448
 
 BACKBONE:
-  TYPE: 'resnet50'
+#  TYPE: 'resnet50'
+  TYPE: 'tresnetl'
 
 LOSS:
   TYPE: 'bce'
@@ -23,15 +24,15 @@ CLASSIFIER:
   BN: False
 
 TRAIN:
-  BATCH_SIZE: 16  # per gpu
-  MAX_EPOCH: 25
+  BATCH_SIZE: 128  # per gpu
+  MAX_EPOCH: 40
   CLIP_GRAD: False
-  BN_WD: True
+  BN_WD: False
   EMA:
     ENABLE: True
   DATAAUG:
-    TYPE: 'autoaug'
-    AUTOAUG_PROB: 1.0
+    TYPE: 'randaug'
+#    AUTOAUG_PROB: 1.0
 
 #  OPTIMIZER:
 #    TYPE: 'SGD'
@@ -56,7 +57,7 @@ TRAIN:
     TYPE: 'adam'
     WEIGHT_DECAY: 1e-4
   LR_SCHEDULER:
-    TYPE: 'warmup_cosine'
+    TYPE: 'onecycle'
     LR_FT: 2e-4
     LR_NEW: 2e-4
     WMUP_COEF: 0.3

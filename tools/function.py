@@ -8,15 +8,15 @@ from easydict import EasyDict
 from tools.utils import may_mkdirs
 
 
-def seperate_weight_decay(named_params, lr, weight_decay=1e-5, skip_list=()):
+def seperate_weight_decay(named_params, lr, weight_decay=1e-4, skip_list=()):
     decay = []
     no_decay = []
     for name, param in named_params:
         if not param.requires_grad:
             continue
-        if len(param.shape) == 1 or name in skip_list:
+        if len(param.shape) == 1 or name.endswith(".bias") or name in skip_list:
             no_decay.append(param)
-        # if 'bias' in name:
+        # if 'bias' in name or 'bn' in name:
         #     no_decay.append(param)
         else:
             decay.append(param)
