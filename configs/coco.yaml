@@ -1,4 +1,5 @@
-NAME: 'tresnetl.base.sgd'
+#NAME: 'tresnetl.base.sgd'
+NAME: 'resnet101.base.sgd.woCutout'
 
 DATASET:
   TYPE: 'multi_label'
@@ -9,8 +10,8 @@ DATASET:
   WIDTH: 448
 
 BACKBONE:
-#  TYPE: 'resnet50'
-  TYPE: 'tresnetl'
+  TYPE: 'resnet101'
+#  TYPE: 'tresnetl'
 
 LOSS:
   TYPE: 'bce'

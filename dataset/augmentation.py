@@ -97,11 +97,11 @@ def get_transform(cfg):
 
             train_transform = T.Compose([
                 T.Resize((height, width), interpolation=3),
-                CutoutPIL(cutout_factor=0.5),
                 RandAugment(),
+                CutoutPIL(cutout_factor=0.5),
                 T.ToTensor(),
             ])
-        elif cfg.TRAIN.DATAAUG.TYPE == 'norm':
+        elif cfg.TRAIN.DATAAUG.TYPE == 'normal':
             train_transform = T.Compose([
                 T.Resize((height, width)),
                 T.RandomHorizontalFlip(),

@@ -67,7 +67,7 @@ def main(cfg, args):
     if cfg.REDIRECTOR:
         if args.local_rank == 0:
             print('redirector stdout')
-        ReDirectSTD(stdout_file, 'stdout', False)
+            ReDirectSTD(stdout_file, 'stdout', False)
 
     if 'WORLD_SIZE' in os.environ:
         args.distributed = int(os.environ['WORLD_SIZE']) > 1
